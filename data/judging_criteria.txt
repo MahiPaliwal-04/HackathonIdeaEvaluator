@@ -1,0 +1,31 @@
+HACKATHON JUDGING CRITERIA
+
+Problem Relevance:
+The idea should solve a real and meaningful problem. Judges evaluate whether the problem affects a significant group of users and whether the proposed solution addresses the problem clearly.
+
+Innovation:
+The idea should have a creative or novel approach. Using existing technology in a meaningful new way can also be considered innovative.
+
+Technical Feasibility:
+The proposed solution should be technically possible to implement with available technologies, resources, time and skills.
+
+Impact:
+The solution should provide measurable benefits to users, society, businesses, education, healthcare or the environment.
+
+User Experience:
+The solution should be easy to understand and useful for the intended users.
+
+Scalability:
+The solution should have potential to expand to more users, locations or use cases.
+
+Sustainability:
+The idea should be maintainable and have a realistic long-term implementation plan.
+
+Judging usually considers:
+Problem Relevance
+Innovation
+Technical Feasibility
+Impact
+User Experience
+Scalability
+Sustainability

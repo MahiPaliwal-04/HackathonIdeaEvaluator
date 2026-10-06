@@ -1,0 +1,42 @@
+TECHNICAL FEASIBILITY GUIDELINES
+
+A technically feasible hackathon project should clearly identify its required technologies, data sources, infrastructure and implementation approach.
+
+Artificial Intelligence projects may use:
+Machine Learning
+Deep Learning
+Computer Vision
+Natural Language Processing
+Large Language Models
+Retrieval Augmented Generation
+Cloud APIs
+Edge AI
+IoT
+
+Important technical considerations:
+1. Is the required data available?
+2. Can the prototype be developed within the hackathon time?
+3. Are the required APIs or models accessible?
+4. Can the system handle the expected number of users?
+5. Is the solution affordable?
+6. Can the proposed technology achieve the intended result?
+
+For computer vision projects such as pothole detection, possible technologies include:
+Object detection
+Image classification
+YOLO
+OpenCV
+Mobile cameras
+GPS
+Mobile or web applications
+
+Potential challenges include:
+Lighting conditions
+Camera quality
+Dataset availability
+False detections
+Different road surfaces
+Model accuracy
+Real-time processing
+
+A good project should acknowledge technical limitations and propose realistic solutions.
