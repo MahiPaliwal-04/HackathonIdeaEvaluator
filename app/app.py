@@ -1,59 +1,63 @@
 import streamlit as st
-import requests
-import re
+from google import genai
+from google.genai import types
 from pathlib import Path
+import numpy as np
+import re
 
-from qdrant_client import QdrantClient
-from qdrant_client.models import VectorParams, Distance, PointStruct
 
+# ============================================================
+# CONFIGURATION
+# ============================================================
 
-# =========================================================
-# SETTINGS
-# =========================================================
-
-OLLAMA_URL = "http://localhost:11434"
-
-LLM_MODEL = "llama3.2:3b"
-EMBED_MODEL = "nomic-embed-text"
+st.set_page_config(
+    page_title="Hackathon Idea Evaluator AI",
+    page_icon="🚀",
+    layout="wide"
+)
 
 BASE_DIR = Path(__file__).parent.parent
 DATA_DIR = BASE_DIR / "data"
-QDRANT_DIR = BASE_DIR / "qdrant_storage"
 
-COLLECTION_NAME = "hackathon_knowledge"
+GEMINI_MODEL = "gemini-2.5-flash"
+EMBED_MODEL = "gemini-embedding-001"
 
 
-# =========================================================
-# OLLAMA EMBEDDING
-# =========================================================
+# ============================================================
+# GEMINI CLIENT
+# ============================================================
 
-def get_embedding(text):
+@st.cache_resource
+def get_gemini_client():
 
-    response = requests.post(
-        f"{OLLAMA_URL}/api/embed",
-        json={
-            "model": EMBED_MODEL,
-            "input": text
-        },
-        timeout=120
+    if "GEMINI_API_KEY" not in st.secrets:
+        st.error("Gemini API key is not configured.")
+        st.stop()
+
+    return genai.Client(
+        api_key=st.secrets["GEMINI_API_KEY"]
     )
 
-    response.raise_for_status()
 
-    return response.json()["embeddings"][0]
+client = get_gemini_client()
 
 
-# =========================================================
-# LOAD KNOWLEDGE FILES
-# =========================================================
+# ============================================================
+# LOAD KNOWLEDGE BASE
+# ============================================================
 
-def load_documents():
+@st.cache_data
+def load_knowledge_base():
 
-    documents = []
+    chunks = []
 
-    for file in DATA_DIR.glob("*.txt"):
+    txt_files = list(DATA_DIR.glob("*.txt"))
 
-        text = file.read_text(encoding="utf-8")
+    for file_path in txt_files:
+
+        text = file_path.read_text(
+            encoding="utf-8"
+        )
 
         paragraphs = text.split("\n\n")
 
@@ -62,162 +66,188 @@ def load_documents():
             paragraph = paragraph.strip()
 
             if paragraph:
-
-                documents.append(
+                chunks.append(
                     {
-                        "text": paragraph,
-                        "source": file.name
+                        "source": file_path.name,
+                        "text": paragraph
                     }
                 )
 
-    return documents
+    return chunks
 
 
-# =========================================================
-# CREATE / LOAD QDRANT DATABASE
-# =========================================================
+knowledge_base = load_knowledge_base()
 
-@st.cache_resource
-def create_database():
 
-    client = QdrantClient(
-        path=str(QDRANT_DIR)
+# ============================================================
+# GENERATE EMBEDDING
+# ============================================================
+
+def get_embedding(text):
+
+    result = client.models.embed_content(
+        model=EMBED_MODEL,
+        contents=text,
+        config=types.EmbedContentConfig(
+            task_type="RETRIEVAL_DOCUMENT",
+            output_dimensionality=768
+        )
     )
 
-    collections = client.get_collections().collections
+    return np.array(
+        result.embeddings[0].values
+    )
 
-    collection_names = []
 
-    for collection in collections:
-        collection_names.append(collection.name)
+# ============================================================
+# PREPARE KNOWLEDGE BASE EMBEDDINGS
+# ============================================================
 
-    if COLLECTION_NAME not in collection_names:
+@st.cache_data
+def create_knowledge_embeddings(texts):
 
-        documents = load_documents()
+    embeddings = []
 
-        if len(documents) == 0:
+    for text in texts:
 
-            st.error(
-                "No knowledge files found in data folder."
-            )
+        embedding = get_embedding(text)
 
-            st.stop()
+        embeddings.append(embedding)
 
-        first_embedding = get_embedding(
-            documents[0]["text"]
+    return np.array(embeddings)
+
+
+knowledge_texts = [
+    item["text"]
+    for item in knowledge_base
+]
+
+if len(knowledge_texts) == 0:
+
+    st.error(
+        "No knowledge base files were found in the data folder."
+    )
+
+    st.stop()
+
+
+knowledge_embeddings = create_knowledge_embeddings(
+    knowledge_texts
+)
+
+
+# ============================================================
+# COSINE SIMILARITY
+# ============================================================
+
+def cosine_similarity(query_vector, vectors):
+
+    query_norm = np.linalg.norm(query_vector)
+
+    vector_norms = np.linalg.norm(
+        vectors,
+        axis=1
+    )
+
+    similarities = np.dot(
+        vectors,
+        query_vector
+    ) / (
+        vector_norms * query_norm + 1e-10
+    )
+
+    return similarities
+
+
+# ============================================================
+# RAG RETRIEVAL
+# ============================================================
+
+def retrieve_relevant_knowledge(
+    idea,
+    top_k=5
+):
+
+    query_embedding = get_embedding(
+        idea
+    )
+
+    similarities = cosine_similarity(
+        query_embedding,
+        knowledge_embeddings
+    )
+
+    top_indices = np.argsort(
+        similarities
+    )[::-1][:top_k]
+
+    results = []
+
+    for index in top_indices:
+
+        results.append(
+            {
+                "source": knowledge_base[index]["source"],
+                "text": knowledge_base[index]["text"],
+                "score": float(similarities[index])
+            }
         )
-
-        vector_size = len(first_embedding)
-
-        client.create_collection(
-            collection_name=COLLECTION_NAME,
-            vectors_config=VectorParams(
-                size=vector_size,
-                distance=Distance.COSINE
-            )
-        )
-
-        points = []
-
-        for i in range(len(documents)):
-
-            embedding = get_embedding(
-                documents[i]["text"]
-            )
-
-            points.append(
-                PointStruct(
-                    id=i,
-                    vector=embedding,
-                    payload={
-                        "text": documents[i]["text"],
-                        "source": documents[i]["source"]
-                    }
-                )
-            )
-
-        client.upsert(
-            collection_name=COLLECTION_NAME,
-            points=points
-        )
-
-    return client
-
-
-# =========================================================
-# SEARCH RAG KNOWLEDGE
-# =========================================================
-
-def search_knowledge(client, query):
-
-    query_embedding = get_embedding(query)
-
-    results = client.query_points(
-        collection_name=COLLECTION_NAME,
-        query=query_embedding,
-        limit=5
-    ).points
 
     return results
 
 
-# =========================================================
-# ASK LLAMA
-# =========================================================
+# ============================================================
+# GEMINI EVALUATION
+# ============================================================
 
-def evaluate_idea(idea, retrieved_results):
+def evaluate_idea(
+    idea,
+    retrieved_knowledge
+):
 
-    knowledge = ""
+    context = ""
 
-    for result in retrieved_results:
+    for i, item in enumerate(
+        retrieved_knowledge,
+        start=1
+    ):
 
-        source = result.payload["source"]
-        text = result.payload["text"]
+        context += f"""
+SOURCE {i}: {item["source"]}
 
-        knowledge += (
-            "\nSOURCE: "
-            + source
-            + "\n"
-            + text
-            + "\n"
-        )
+{item["text"]}
+
+"""
+
 
     prompt = f"""
-You are a professional Hackathon Idea Evaluator AI.
+You are an expert hackathon project evaluator.
 
-Evaluate the submitted hackathon idea using the retrieved
-knowledge from the RAG knowledge base.
-
-IMPORTANT:
-- Use retrieved knowledge as the main basis.
-- Do not invent facts from the knowledge base.
-- Give realistic and practical feedback.
-- Scores must be from 1 to 10.
-- Explain each score briefly.
-- Consider technical limitations.
+Evaluate the following hackathon idea using ONLY the
+retrieved knowledge as supporting evidence.
 
 HACKATHON IDEA:
-
 {idea}
 
 
 RETRIEVED KNOWLEDGE:
-
-{knowledge}
-
-
-Evaluate using these criteria:
-
-Problem Relevance
-Innovation
-Technical Feasibility
-Impact
-User Experience
-Scalability
-Sustainability
+{context}
 
 
-Use EXACTLY this format:
+Evaluate the idea on these seven criteria.
+
+1. Problem Relevance
+2. Innovation
+3. Technical Feasibility
+4. Impact
+5. User Experience
+6. Scalability
+7. Sustainability
+
+
+Give a score from 1 to 10 for every criterion.
+
+Use exactly this format:
 
 Problem Relevance: X/10
 Innovation: X/10
@@ -227,487 +257,381 @@ User Experience: X/10
 Scalability: X/10
 Sustainability: X/10
 
-STRENGTHS:
-
+Strengths:
 - point
 - point
 - point
 
-WEAKNESSES:
-
+Weaknesses:
 - point
 - point
 - point
 
-SUGGESTIONS:
-
+Suggestions:
 - point
 - point
 - point
 
-FINAL VERDICT:
+Final Verdict:
+Give a short overall judgement of the idea.
 
-Give a short overall judgement.
+Important:
+- Be realistic.
+- Do not give every criterion the same score.
+- Explain the reasoning clearly.
+- Consider the retrieved hackathon knowledge.
+- Do not invent facts from the knowledge base.
 """
 
-    response = requests.post(
-        f"{OLLAMA_URL}/api/generate",
-        json={
-            "model": LLM_MODEL,
-            "prompt": prompt,
-            "stream": False
-        },
-        timeout=300
+
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=prompt
     )
 
-    response.raise_for_status()
-
-    return response.json()["response"]
+    return response.text
 
 
-# =========================================================
-# GET SCORE
-# =========================================================
+# ============================================================
+# EXTRACT SCORES
+# ============================================================
 
-def get_score(text, criterion):
+def extract_scores(text):
 
-    pattern = (
-        re.escape(criterion)
-        + r":\s*(\d+)\s*/\s*10"
-    )
+    criteria = [
+        "Problem Relevance",
+        "Innovation",
+        "Technical Feasibility",
+        "Impact",
+        "User Experience",
+        "Scalability",
+        "Sustainability"
+    ]
 
-    match = re.search(
-        pattern,
-        text,
-        re.IGNORECASE
-    )
+    scores = {}
 
-    if match:
-        return int(match.group(1))
+    for criterion in criteria:
 
-    return None
+        pattern = (
+            re.escape(criterion)
+            + r"\s*:\s*(\d+(?:\.\d+)?)\s*/\s*10"
+        )
+
+        match = re.search(
+            pattern,
+            text,
+            re.IGNORECASE
+        )
+
+        if match:
+
+            scores[criterion] = float(
+                match.group(1)
+            )
+
+    return scores
 
 
-# =========================================================
-# PAGE SETTINGS
-# =========================================================
+# ============================================================
+# OVERALL SCORE
+# ============================================================
 
-st.set_page_config(
-    page_title="Hackathon Idea Evaluator AI",
-    page_icon="🏆",
-    layout="wide"
+def calculate_overall_score(scores):
+
+    if not scores:
+        return 0
+
+    return sum(
+        scores.values()
+    ) / len(scores)
+
+
+# ============================================================
+# DECISION
+# ============================================================
+
+def get_decision(score):
+
+    if score >= 8:
+        return "🟢 Strong Idea"
+
+    elif score >= 6:
+        return "🟡 Needs Improvement"
+
+    else:
+        return "🔴 Weak Idea"
+
+
+# ============================================================
+# USER INTERFACE
+# ============================================================
+
+st.title(
+    "🚀 Hackathon Idea Evaluator AI"
 )
-
-
-# =========================================================
-# CUSTOM CSS
-# =========================================================
 
 st.markdown(
     """
-    <style>
+### AI-powered Hackathon Idea Evaluation using RAG + LLM
 
-    .main-title {
-        font-size: 42px;
-        font-weight: 700;
-        text-align: center;
-        margin-bottom: 5px;
-    }
-
-    .subtitle {
-        text-align: center;
-        font-size: 18px;
-        margin-bottom: 25px;
-    }
-
-    .score-box {
-        text-align: center;
-        padding: 20px;
-        border-radius: 12px;
-        border: 1px solid #dddddd;
-        margin-bottom: 20px;
-    }
-
-    .overall-score {
-        font-size: 42px;
-        font-weight: 700;
-    }
-
-    .decision {
-        font-size: 20px;
-        font-weight: 600;
-    }
-
-    </style>
-    """,
-    unsafe_allow_html=True
+Enter your hackathon idea and get an AI-based evaluation
+using relevant hackathon judging criteria, successful
+project examples and technical feasibility guidelines.
+"""
 )
 
 
-# =========================================================
-# HEADER
-# =========================================================
-
-st.markdown(
-    '<div class="main-title">🏆 Hackathon Idea Evaluator AI</div>',
-    unsafe_allow_html=True
-)
-
-st.markdown(
-    '<div class="subtitle">'
-    'Evaluate your hackathon idea using LLM + RAG'
-    '</div>',
-    unsafe_allow_html=True
-)
-
-
-st.divider()
-
-
-# =========================================================
+# ============================================================
 # SIDEBAR
-# =========================================================
+# ============================================================
 
 with st.sidebar:
 
-    st.header("🔎 How It Works")
+    st.header("⚙️ System Information")
 
     st.write(
-        "1️⃣ Enter your hackathon idea."
+        "**LLM:** Gemini"
     )
 
     st.write(
-        "2️⃣ RAG retrieves relevant knowledge."
+        "**Embedding Model:** Gemini Embedding"
     )
 
     st.write(
-        "3️⃣ Llama 3.2 evaluates the idea."
+        "**RAG:** Semantic Vector Retrieval"
     )
 
     st.write(
-        "4️⃣ Scores and recommendations are generated."
+        "**Knowledge Base:** Hackathon Guidelines"
+    )
+
+    st.write(
+        "**Interface:** Streamlit"
+    )
+
+    st.write(
+        "**Language:** Python"
     )
 
     st.divider()
 
-    st.header("⚙️ Technology")
-
-    st.write("• Llama 3.2 3B")
-
-    st.write("• Nomic Embed")
-
-    st.write("• Qdrant")
-
-    st.write("• Streamlit")
-
-    st.write("• Python")
+    st.info(
+        "The system retrieves relevant knowledge "
+        "before asking the LLM to evaluate the idea."
+    )
 
 
-# =========================================================
+# ============================================================
 # IDEA INPUT
-# =========================================================
+# ============================================================
 
-st.subheader("💡 Enter Your Hackathon Idea")
+st.subheader(
+    "💡 Enter Your Hackathon Idea"
+)
 
 idea = st.text_area(
-    "",
+    "Hackathon idea",
     placeholder=(
-        "Example: Our idea is an AI system that "
-        "detects potholes using smartphone cameras "
-        "and GPS."
+        "Example: Our idea is an AI-based system "
+        "that detects potholes using smartphone cameras "
+        "and alerts users about damaged roads."
     ),
-    height=170
+    height=180,
+    label_visibility="collapsed"
 )
 
 
-# =========================================================
+# ============================================================
 # EVALUATE BUTTON
-# =========================================================
+# ============================================================
 
 if st.button(
-    "🚀 Evaluate Idea",
+    "🔍 Evaluate Idea",
     type="primary",
     use_container_width=True
 ):
 
-    if idea.strip() == "":
+    if not idea.strip():
 
         st.warning(
             "Please enter a hackathon idea first."
         )
 
-    else:
-
-        try:
-
-            # -------------------------------------------------
-            # RAG DATABASE
-            # -------------------------------------------------
-
-            with st.spinner(
-                "🔎 Searching knowledge base..."
-            ):
-
-                client = create_database()
+        st.stop()
 
 
-            # -------------------------------------------------
-            # RETRIEVAL
-            # -------------------------------------------------
+    # --------------------------------------------------------
+    # STEP 1: RAG RETRIEVAL
+    # --------------------------------------------------------
 
-            with st.spinner(
-                "📚 Retrieving relevant knowledge..."
-            ):
+    with st.spinner(
+        "🔎 Retrieving relevant hackathon knowledge..."
+    ):
 
-                results = search_knowledge(
-                    client,
-                    idea
-                )
-
-
-            # -------------------------------------------------
-            # LLM
-            # -------------------------------------------------
-
-            with st.spinner(
-                "🤖 Llama 3.2 is evaluating your idea..."
-            ):
-
-                evaluation = evaluate_idea(
-                    idea,
-                    results
-                )
+        retrieved_knowledge = (
+            retrieve_relevant_knowledge(
+                idea,
+                top_k=5
+            )
+        )
 
 
-            # -------------------------------------------------
-            # GET SCORES
-            # -------------------------------------------------
+    # --------------------------------------------------------
+    # STEP 2: GEMINI EVALUATION
+    # --------------------------------------------------------
 
-            criteria = [
-                "Problem Relevance",
-                "Innovation",
-                "Technical Feasibility",
-                "Impact",
-                "User Experience",
-                "Scalability",
-                "Sustainability"
-            ]
+    with st.spinner(
+        "🤖 Gemini is evaluating your idea..."
+    ):
 
-            scores = {}
-
-            for criterion in criteria:
-
-                scores[criterion] = get_score(
-                    evaluation,
-                    criterion
-                )
+        evaluation = evaluate_idea(
+            idea,
+            retrieved_knowledge
+        )
 
 
-            valid_scores = []
+    # --------------------------------------------------------
+    # STEP 3: EXTRACT SCORES
+    # --------------------------------------------------------
 
-            for score in scores.values():
+    scores = extract_scores(
+        evaluation
+    )
 
-                if score is not None:
+    overall_score = calculate_overall_score(
+        scores
+    )
 
-                    valid_scores.append(score)
+    decision = get_decision(
+        overall_score
+    )
 
 
-            # -------------------------------------------------
-            # OVERALL SCORE
-            # -------------------------------------------------
+    # ========================================================
+    # OVERALL RESULT
+    # ========================================================
 
-            if len(valid_scores) > 0:
+    st.divider()
 
-                overall_score = (
-                    sum(valid_scores)
-                    / len(valid_scores)
-                )
+    st.subheader(
+        "📊 Overall Evaluation"
+    )
 
-                overall_score = round(
-                    overall_score,
-                    1
+    col1, col2 = st.columns(2)
+
+    with col1:
+
+        st.metric(
+            "Overall Score",
+            f"{overall_score:.1f}/10"
+        )
+
+    with col2:
+
+        st.metric(
+            "Decision",
+            decision
+        )
+
+
+    # ========================================================
+    # CRITERIA SCORES
+    # ========================================================
+
+    st.subheader(
+        "📈 Evaluation Criteria"
+    )
+
+    score_columns = st.columns(4)
+
+    criteria_order = [
+        "Problem Relevance",
+        "Innovation",
+        "Technical Feasibility",
+        "Impact",
+        "User Experience",
+        "Scalability",
+        "Sustainability"
+    ]
+
+    for i, criterion in enumerate(
+        criteria_order
+    ):
+
+        with score_columns[i % 4]:
+
+            if criterion in scores:
+
+                st.metric(
+                    criterion,
+                    f"{scores[criterion]:.1f}/10"
                 )
 
             else:
 
-                overall_score = 0
-
-
-            # -------------------------------------------------
-            # DECISION
-            # -------------------------------------------------
-
-            if overall_score >= 8:
-
-                decision = "🟢 Strong Idea"
-
-            elif overall_score >= 6:
-
-                decision = "🟡 Needs Improvement"
-
-            else:
-
-                decision = "🔴 Weak Idea"
-
-
-            # =================================================
-            # RESULT HEADER
-            # =================================================
-
-            st.success(
-                "Evaluation completed successfully!"
-            )
-
-
-            st.divider()
-
-
-            # =================================================
-            # OVERALL SCORE
-            # =================================================
-
-            st.subheader(
-                "🏆 Overall Evaluation"
-            )
-
-            col1, col2 = st.columns(2)
-
-            with col1:
-
-                st.markdown(
-                    f"""
-                    <div class="score-box">
-
-                    <div>Overall Score</div>
-
-                    <div class="overall-score">
-                    {overall_score}/10
-                    </div>
-
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
-
-            with col2:
-
-                st.markdown(
-                    f"""
-                    <div class="score-box">
-
-                    <div>Decision</div>
-
-                    <div class="decision">
-                    {decision}
-                    </div>
-
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
-
-
-            # =================================================
-            # INDIVIDUAL SCORES
-            # =================================================
-
-            st.subheader(
-                "📊 Detailed Scores"
-            )
-
-            row1 = st.columns(4)
-
-            for i in range(4):
-
-                criterion = criteria[i]
-
-                score = scores[criterion]
-
-                if score is None:
-                    value = "N/A"
-                else:
-                    value = f"{score}/10"
-
-                row1[i].metric(
+                st.metric(
                     criterion,
-                    value
+                    "N/A"
                 )
 
 
-            row2 = st.columns(3)
+    # ========================================================
+    # AI EVALUATION
+    # ========================================================
 
-            for i in range(3):
+    st.divider()
 
-                criterion = criteria[i + 4]
+    st.subheader(
+        "🤖 AI Evaluation"
+    )
 
-                score = scores[criterion]
-
-                if score is None:
-                    value = "N/A"
-                else:
-                    value = f"{score}/10"
-
-                row2[i].metric(
-                    criterion,
-                    value
-                )
+    st.markdown(
+        evaluation
+    )
 
 
-            st.divider()
+    # ========================================================
+    # RAG EVIDENCE
+    # ========================================================
+
+    st.divider()
+
+    st.subheader(
+        "📚 RAG Evidence"
+    )
+
+    st.write(
+        "The following knowledge was retrieved "
+        "from the hackathon knowledge base."
+    )
 
 
-            # =================================================
-            # AI EVALUATION
-            # =================================================
+    for i, item in enumerate(
+        retrieved_knowledge,
+        start=1
+    ):
 
-            st.subheader(
-                "🤖 AI Evaluation"
-            )
-
-            st.markdown(
-                evaluation
-            )
-
-
-            # =================================================
-            # RAG EVIDENCE
-            # =================================================
-
-            st.divider()
-
-            st.subheader(
-                "📚 RAG Evidence"
-            )
+        with st.expander(
+            f"Evidence {i} — {item['source']}"
+        ):
 
             st.write(
-                "The following knowledge was retrieved "
-                "from the project knowledge base before "
-                "the LLM generated the evaluation."
+                item["text"]
             )
 
-            for i in range(len(results)):
-
-                source = results[i].payload["source"]
-
-                text = results[i].payload["text"]
-
-                with st.expander(
-                    f"📄 Source {i + 1}: {source}"
-                ):
-
-                    st.write(text)
-
-
-        except Exception as e:
-
-            st.error(
-                "An error occurred."
+            st.caption(
+                f"Similarity Score: "
+                f"{item['score']:.3f}"
             )
 
-            st.write(
-                "Please check the error below:"
-            )
 
-            st.code(
-                str(e)
-            )
+# ============================================================
+# FOOTER
+# ============================================================
+
+st.divider()
+
+st.caption(
+    "Hackathon Idea Evaluator AI | "
+    "RAG + LLM + Semantic Retrieval"
+)
