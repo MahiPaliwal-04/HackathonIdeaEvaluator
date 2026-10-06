@@ -1,3 +1,6 @@
+### 🚀 Live Demo
+
+[Open Hackathon Idea Evaluator](https://mahipaliwal-04-hackathonideaevaluator-appapp-cz5u7d.streamlit.app/)
 # 🏆 Hackathon Idea Evaluator AI
 
 An LLM and RAG-based AI system that evaluates hackathon ideas and provides scores, strengths, weaknesses, and practical suggestions.
