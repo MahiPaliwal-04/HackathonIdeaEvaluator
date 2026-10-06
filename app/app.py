@@ -19,7 +19,7 @@ st.set_page_config(
 BASE_DIR = Path(__file__).parent.parent
 DATA_DIR = BASE_DIR / "data"
 
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-3.8-flash"
 EMBED_MODEL = "gemini-embedding-001"
 
 
